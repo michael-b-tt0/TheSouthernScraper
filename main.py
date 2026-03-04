@@ -11,7 +11,7 @@ from PyQt6.QtGui import QFont, QColor, QPalette, QIcon
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QLineEdit, QDateEdit, QPushButton, QTextEdit,
-    QSplitter, QFrame, QGroupBox, QSizePolicy,
+    QSplitter, QFrame, QGroupBox, QSizePolicy, QFileDialog,
 )
 
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
@@ -204,6 +204,10 @@ class MainWindow(QMainWindow):
         self.setMinimumSize(900, 680)
         self.resize(1060, 780)
         self._thread = None
+        self._df = None
+        self._last_leaving = ""
+        self._last_going = ""
+        self._last_end_date = None
 
         central = QWidget()
         self.setCentralWidget(central)
@@ -270,6 +274,13 @@ class MainWindow(QMainWindow):
         self.stop_btn.setEnabled(False)
         self.stop_btn.clicked.connect(self.on_stop)
         btn_row.addWidget(self.stop_btn)
+        
+        self.export_btn = QPushButton("💾  Export CSV")
+        self.export_btn.setObjectName("startBtn")
+        self.export_btn.setEnabled(False)
+        self.export_btn.clicked.connect(self.on_export)
+        btn_row.addWidget(self.export_btn)
+        
         btn_col.addLayout(btn_row)
         input_layout.addLayout(btn_col, 1)
 
@@ -315,6 +326,11 @@ class MainWindow(QMainWindow):
 
         self.start_btn.setEnabled(False)
         self.stop_btn.setEnabled(True)
+        self.export_btn.setEnabled(False)
+
+        self._last_leaving = leaving
+        self._last_going = going
+        self._last_end_date = end_date
 
         self._thread = ScraperThread(leaving, going, end_date)
         self._thread.progress.connect(self._on_progress)
@@ -328,10 +344,33 @@ class MainWindow(QMainWindow):
             self.log.append("Requesting stop …")
             self._thread.request_stop()
 
+    def on_export(self):
+        if self._df is None or self._df.empty:
+            return
+            
+        # Build the dynamic default filename
+        safe_from = self._last_leaving.replace(" ", "_").lower()
+        safe_to = self._last_going.replace(" ", "_").lower()
+        date_str = self._last_end_date.strftime("%Y-%m-%d") if self._last_end_date else "unknown"
+        default_name = f"{safe_from}_to_{safe_to}_until_{date_str}.csv"
+        
+        filename, _ = QFileDialog.getSaveFileName(
+            self, "Export to CSV", default_name, "CSV Files (*.csv)"
+        )
+        if filename:
+            try:
+                self._df.to_csv(filename, index=False)
+                self.log.append(f"\n✅  Exported {len(self._df)} rows to {filename}")
+            except Exception as e:
+                self.log.append(f"\n❌  Failed to export CSV: {e}")
+
     def _on_progress(self, msg: str):
         self.log.append(msg)
 
     def _on_results(self, df):
+        self._df = df
+        if not df.empty:
+            self.export_btn.setEnabled(True)
         self.log.append(f"\n✅  Received {len(df)} train records.")
         if not df.empty:
             priced = df.dropna(subset=["price_gbp"])
