@@ -26,6 +26,7 @@ class ScraperThread(QThread):
     error = pyqtSignal(str)
 
     SITE_URL = "https://www.southernrailway.com"
+    MAX_LATER_CLICKS_PER_BATCH = 30
 
     def __init__(
         self,
@@ -48,6 +49,19 @@ class ScraperThread(QThread):
     def request_stop(self):
         """Call from the main thread to ask the scraper to stop early."""
         self._stop_flag = True
+
+    def _accept_cookies(self, driver):
+        self.progress.emit("Accepting cookies …")
+        try:
+            btn = WebDriverWait(driver, 10).until(
+                EC.element_to_be_clickable(
+                    (By.ID, "CybotCookiebotDialogBodyLevelButtonLevelOptinAllowAll")
+                )
+            )
+            btn.click()
+            t.sleep(3)
+        except TimeoutException:
+            self.progress.emit("  Cookie banner not found – continuing anyway.")
 
     def _select_outbound_date_time(self, driver, shadow_root):
         """Set the outbound date/time in the Southern date picker."""
@@ -108,33 +122,21 @@ class ScraperThread(QThread):
             f"Selected outbound date/time: {self.start_date:%Y-%m-%d} {self.start_time}"
         )
 
-    # ------------------------------------------------------------------
-    def run(self):
-        driver = None
-        try:
-            self.progress.emit("Launching browser …")
-            driver = webdriver.Edge()
-            driver.get(self.SITE_URL)
-            t.sleep(5)
+    def _open_results_page(self, driver, batch_number: int, start_date: datetime.date, start_time: str):
+        """Open the search page, fill the form, and return the first results-page date."""
+        self.progress.emit(
+            f"Opening batch {batch_number} from {start_date:%Y-%m-%d} {start_time} …"
+        )
+        driver.get(self.SITE_URL)
+        t.sleep(5)
 
-            # --- accept cookies ----
-            self.progress.emit("Accepting cookies …")
-            try:
-                btn = WebDriverWait(driver, 10).until(
-                    EC.element_to_be_clickable(
-                        (By.ID, "CybotCookiebotDialogBodyLevelButtonLevelOptinAllowAll")
-                    )
-                )
-                btn.click()
-                t.sleep(3)
-            except TimeoutException:
-                self.progress.emit("  Cookie banner not found – continuing anyway.")
+        self._accept_cookies(driver)
 
-            # --- fill station inputs (shadow DOM) ---
-            self.progress.emit(f"Entering stations: {self.leaving_from} → {self.going_to}")
-            shadow_host = driver.find_element(By.ID, "otrl-custom-hero")
-            shadow_root = shadow_host.shadow_root
+        self.progress.emit(f"Entering stations: {self.leaving_from} → {self.going_to}")
+        shadow_host = driver.find_element(By.ID, "otrl-custom-hero")
+        shadow_root = shadow_host.shadow_root
 
+        if batch_number == 1:
             leaving = shadow_root.find_element(By.NAME, "stationFrom")
             leaving.send_keys(self.leaving_from)
             WebDriverWait(driver, 5).until(
@@ -158,47 +160,64 @@ class ScraperThread(QThread):
                 By.CSS_SELECTOR, ".otrl-jp__station-autosuggest__item"
             ).click()
             t.sleep(3)
+        else:
+            self.progress.emit("Reusing existing stations for this batch.")
 
-            # --- select outbound date/time ---
-            self.progress.emit(
-                f"Setting outbound date/time to {self.start_date:%Y-%m-%d} {self.start_time} …"
-            )
-            self._select_outbound_date_time(driver, shadow_root)
+        self.start_date = start_date
+        self.start_time = start_time
+        self.progress.emit(
+            f"Setting outbound date/time to {self.start_date:%Y-%m-%d} {self.start_time} …"
+        )
+        self._select_outbound_date_time(driver, shadow_root)
 
-            # --- click search ---
-            shadow_root.find_element(
-                By.CLASS_NAME, "otrl-jp__tickets__submit"
-            ).click()
-            t.sleep(5)
+        shadow_root.find_element(
+            By.CLASS_NAME, "otrl-jp__tickets__submit"
+        ).click()
+        t.sleep(5)
 
-            # --- scrape results ---
-            self.progress.emit("Results page loaded – beginning scrape …")
-            
-            # Switch to list view
-            self.progress.emit("Switching to list view …")
-            listview = driver.find_element(By.CSS_SELECTOR, 'a[aria-label="List view"]')
-            listview.click()
-            t.sleep(3)
+        self.progress.emit("Results page loaded – switching to list view …")
+        listview = driver.find_element(By.CSS_SELECTOR, 'a[aria-label="List view"]')
+        listview.click()
+        t.sleep(3)
 
+        try:
+            date_text = driver.find_element(
+                By.CSS_SELECTOR, ".service-list__heading2"
+            ).text.strip()
+            return datetime.datetime.strptime(date_text, "%a %d %b %Y").date()
+        except Exception as e:
+            self.progress.emit(f"  Could not parse date header: {e}")
+            return start_date
+
+    def _restart_anchor_from_departure(self, departure_dt: datetime.datetime):
+        """Use the next quarter-hour after the last scraped train as the next batch anchor."""
+        total_minutes = departure_dt.hour * 60 + departure_dt.minute
+        next_minutes = ((total_minutes // 15) + 1) * 15
+        anchor_date = departure_dt.date()
+        if next_minutes >= 24 * 60:
+            next_minutes -= 24 * 60
+            anchor_date += datetime.timedelta(days=1)
+        anchor_time = f"{next_minutes // 60:02d}:{next_minutes % 60:02d}"
+        anchor_dt = datetime.datetime.combine(
+            anchor_date,
+            datetime.time(next_minutes // 60, next_minutes % 60),
+        )
+        return anchor_date, anchor_time, anchor_dt
+
+    # ------------------------------------------------------------------
+    def run(self):
+        driver = None
+        try:
+            self.progress.emit("Launching browser …")
+            driver = webdriver.Edge()
             wait = WebDriverWait(driver, 5)
             seen_departures: set = set()
             records: list[dict] = []
 
-            # Determine the current displayed date
-            try:
-                date_text = driver.find_element(
-                    By.CSS_SELECTOR, ".service-list__heading2"
-                ).text.strip()
-                current_date = datetime.datetime.strptime(date_text, "%a %d %b %Y").date()
-            except Exception as e:
-                self.progress.emit(f"  Could not parse date header: {e}")
-                current_date = datetime.date.today()
-
-            current_date_tracker = current_date
-
             # ---- helper ------------------------------------------------
             def parse_current_page():
                 nonlocal current_date_tracker
+                added_count = 0
                 cards = driver.find_elements(By.CSS_SELECTOR, ".service-list__card.service-fare")
 
                 for i, card in enumerate(cards):
@@ -262,8 +281,10 @@ class ScraperThread(QThread):
                             "price_gbp": price,
                         })
                         seen_departures.add(dedup_key)
+                        added_count += 1
                     except Exception as e:
                         self.progress.emit(f"  Error parsing train {i}: {e}")
+                return added_count
 
             def log_later_timeout(stage: str):
                 """Emit lightweight diagnostics when pagination stops responding."""
@@ -288,7 +309,7 @@ class ScraperThread(QThread):
                     last_visible_time = f"<error reading times: {e}>"
 
                 self.progress.emit(
-                    f"Click {click_num + 1}: timeout while waiting for {stage}."
+                    f"Batch {batch_number}, click {batch_clicks + 1}: timeout while waiting for {stage}."
                 )
                 self.progress.emit(
                     f"  Diagnostics: url={driver.current_url} | later_buttons={button_count} | "
@@ -296,78 +317,150 @@ class ScraperThread(QThread):
                 )
 
             # ---- initial parse ----------------------------------------
-            parse_current_page()
-            self.progress.emit(f"After initial load: {len(records)} trains")
+            total_click_num = 0
+            batch_number = 0
+            batch_start_date = self.start_date
+            batch_start_time = self.start_time
+            forced_forward_retry_used = False
 
-            # ---- paginate with "Later" button -------------------------
-            click_num = 0
             while not self._stop_flag:
-                # Check end-date condition
-                if current_date_tracker > self.end_date:
-                    self.progress.emit(
-                        f"Reached end date ({self.end_date}) — stopping."
-                    )
-                    break
-
-                try:
-                    t.sleep(random.uniform(1.2, 2.2))
-                    time_elements = driver.find_elements(
-                        By.CSS_SELECTOR, ".service-list-v2__services li .service-summary__station time"
-                    )
-                    if not time_elements:
-                        self.progress.emit(f"Click {click_num + 1}: no time elements found, stopping.")
-                        break
-                    last_departure_before = time_elements[-1].get_attribute("datetime")
-
-                    try:
-                        later_btn = wait.until(
-                            EC.element_to_be_clickable(
-                                (By.CSS_SELECTOR, "a.service-pager[aria-label='Show later trains']")
-                            )
-                        )
-                    except TimeoutException:
-                        log_later_timeout("the 'Later' button to become clickable")
-                        break
-
-                    driver.execute_script("arguments[0].click();", later_btn)
-                    
-                    def page_has_updated(d):
-                        try:
-                            elements = d.find_elements(
-                                By.CSS_SELECTOR, ".service-list-v2__services li .service-summary__station time"
-                            )
-                            return (
-                                len(elements) > 0
-                                and elements[-1].get_attribute("datetime") != last_departure_before
-                            )
-                        except Exception:
-                            return False
-
-                    try:
-                        WebDriverWait(driver, 10).until(page_has_updated)
-                    except TimeoutException:
-                        log_later_timeout("the results list to change after clicking 'Later'")
-                        break
-
-                    try:
-                        WebDriverWait(driver, 10).until(
-                            EC.presence_of_element_located(
-                                (By.CSS_SELECTOR, ".service-list-v2__services li .btn-continue")
-                            )
-                        )
-                    except TimeoutException:
-                        log_later_timeout("refreshed fare buttons to appear")
-                        break
-
-                except Exception as e:
-                    self.progress.emit(f"Click {click_num + 1}: pagination failed: {e}")
-                    break
-
-                parse_current_page()
-                click_num += 1
-                self.progress.emit(
-                    f"After click {click_num}: {len(records)} trains total"
+                batch_number += 1
+                current_batch_anchor = datetime.datetime.combine(
+                    batch_start_date,
+                    datetime.datetime.strptime(batch_start_time, "%H:%M").time(),
                 )
+                current_date_tracker = self._open_results_page(
+                    driver, batch_number, batch_start_date, batch_start_time
+                )
+
+                added_on_load = parse_current_page()
+                self.progress.emit(
+                    f"Batch {batch_number} initial load: +{added_on_load} trains, {len(records)} total"
+                )
+
+                reached_end_date = False
+                batch_clicks = 0
+                while not self._stop_flag:
+                    if current_date_tracker > self.end_date:
+                        self.progress.emit(
+                            f"Reached end date ({self.end_date}) — stopping."
+                        )
+                        reached_end_date = True
+                        break
+
+                    if batch_clicks >= self.MAX_LATER_CLICKS_PER_BATCH:
+                        self.progress.emit(
+                            f"Batch {batch_number}: reached {self.MAX_LATER_CLICKS_PER_BATCH} Later clicks, restarting from last scraped train."
+                        )
+                        break
+
+                    try:
+                        t.sleep(random.uniform(1.2, 2.2))
+                        time_elements = driver.find_elements(
+                            By.CSS_SELECTOR, ".service-list-v2__services li .service-summary__station time"
+                        )
+                        if not time_elements:
+                            self.progress.emit(
+                                f"Batch {batch_number}, click {batch_clicks + 1}: no time elements found, restarting."
+                            )
+                            break
+                        last_departure_before = time_elements[-1].get_attribute("datetime")
+
+                        try:
+                            later_btn = wait.until(
+                                EC.element_to_be_clickable(
+                                    (By.CSS_SELECTOR, "a.service-pager[aria-label='Show later trains']")
+                                )
+                            )
+                        except TimeoutException:
+                            log_later_timeout("the 'Later' button to become clickable")
+                            break
+
+                        driver.execute_script("arguments[0].click();", later_btn)
+
+                        def page_has_updated(d):
+                            try:
+                                elements = d.find_elements(
+                                    By.CSS_SELECTOR, ".service-list-v2__services li .service-summary__station time"
+                                )
+                                return (
+                                    len(elements) > 0
+                                    and elements[-1].get_attribute("datetime") != last_departure_before
+                                )
+                            except Exception:
+                                return False
+
+                        try:
+                            WebDriverWait(driver, 10).until(page_has_updated)
+                        except TimeoutException:
+                            log_later_timeout("the results list to change after clicking 'Later'")
+                            break
+
+                        try:
+                            WebDriverWait(driver, 10).until(
+                                EC.presence_of_element_located(
+                                    (By.CSS_SELECTOR, ".service-list-v2__services li .btn-continue")
+                                )
+                            )
+                        except TimeoutException:
+                            log_later_timeout("refreshed fare buttons to appear")
+                            break
+
+                    except Exception as e:
+                        self.progress.emit(
+                            f"Batch {batch_number}, click {batch_clicks + 1}: pagination failed: {e}"
+                        )
+                        break
+
+                    added_count = parse_current_page()
+                    batch_clicks += 1
+                    total_click_num += 1
+                    self.progress.emit(
+                        f"After total click {total_click_num} (batch {batch_number} click {batch_clicks}): +{added_count} trains, {len(records)} total"
+                    )
+
+                if self._stop_flag or reached_end_date:
+                    break
+
+                if not records:
+                    self.progress.emit("No trains were collected in this batch; stopping.")
+                    break
+
+                next_start_date, next_start_time, next_anchor = self._restart_anchor_from_departure(
+                    records[-1]["departure_dt"]
+                )
+                if next_anchor <= current_batch_anchor:
+                    if forced_forward_retry_used:
+                        self.progress.emit(
+                            "Restart anchor still did not advance after forcing the next day start; stopping to avoid looping."
+                        )
+                        break
+
+                    forced_forward_retry_used = True
+                    batch_start_date = current_batch_anchor.date() + datetime.timedelta(days=1)
+                    batch_start_time = "00:00"
+                    self.progress.emit(
+                        f"Restart anchor did not advance beyond the current batch start; forcing retry from {batch_start_date} 00:00."
+                    )
+                    if batch_start_date > self.end_date:
+                        self.progress.emit(
+                            f"Forced retry date {batch_start_date} is beyond end date ({self.end_date}) — stopping."
+                        )
+                        break
+                    continue
+
+                if next_start_date > self.end_date:
+                    self.progress.emit(
+                        f"Next restart date {next_start_date} is beyond end date ({self.end_date}) — stopping."
+                    )
+                    break
+
+                forced_forward_retry_used = False
+                self.progress.emit(
+                    f"Restarting from last scraped train at {records[-1]['departure_dt']} using anchor {next_start_date} {next_start_time}."
+                )
+                batch_start_date = next_start_date
+                batch_start_time = next_start_time
 
             if self._stop_flag:
                 self.progress.emit("Scraping cancelled by user.")

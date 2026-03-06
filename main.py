@@ -464,8 +464,9 @@ class MainWindow(QMainWindow):
         # Build the dynamic default filename
         safe_from = self._last_leaving.replace(" ", "_").lower()
         safe_to = self._last_going.replace(" ", "_").lower()
-        date_str = self._last_end_date.strftime("%Y-%m-%d") if self._last_end_date else "unknown"
-        default_name = f"{safe_from}_to_{safe_to}_until_{date_str}.csv"
+        date_end = self._last_end_date.strftime("%Y-%m-%d") if self._last_end_date else "unknown"
+        date_start = self._last_start_dt.strftime("%Y-%m-%d_%H%M") if self._last_start_dt else "unknown"
+        default_name = f"{safe_from}_to_{safe_to}_{date_start}_until_{date_end}.csv"
         
         filename, _ = QFileDialog.getSaveFileName(
             self, "Export to CSV", default_name, "CSV Files (*.csv)"
