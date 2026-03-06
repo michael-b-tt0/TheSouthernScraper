@@ -10,7 +10,7 @@ Emits:
 from PyQt6.QtCore import QThread, pyqtSignal
 from selenium import webdriver
 from selenium.webdriver.common.by import By
-from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support.ui import Select, WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.common.exceptions import TimeoutException
 import pandas as pd
@@ -27,10 +27,20 @@ class ScraperThread(QThread):
 
     SITE_URL = "https://www.southernrailway.com"
 
-    def __init__(self, leaving_from: str, going_to: str, end_date: datetime.date, parent=None):
+    def __init__(
+        self,
+        leaving_from: str,
+        going_to: str,
+        start_date: datetime.date,
+        start_time: str,
+        end_date: datetime.date,
+        parent=None,
+    ):
         super().__init__(parent)
         self.leaving_from = leaving_from
         self.going_to = going_to
+        self.start_date = start_date
+        self.start_time = start_time
         self.end_date = end_date
         self._stop_flag = False
 
@@ -38,6 +48,65 @@ class ScraperThread(QThread):
     def request_stop(self):
         """Call from the main thread to ask the scraper to stop early."""
         self._stop_flag = True
+
+    def _select_outbound_date_time(self, driver, shadow_root):
+        """Set the outbound date/time in the Southern date picker."""
+        wait = WebDriverWait(driver, 10)
+
+        date_input = shadow_root.find_element(By.CSS_SELECTOR, ".otrl-jp__date-input")
+        date_input.click()
+        t.sleep(1)
+
+        target_month_year = self.start_date.strftime("%B %Y")
+        for _ in range(12):
+            current = shadow_root.find_element(
+                By.CSS_SELECTOR, ".DayPicker-Caption div"
+            ).text.strip()
+            if current == target_month_year:
+                break
+            shadow_root.find_element(
+                By.CSS_SELECTOR,
+                ".otrl-ui__date-picker__month-selector__button--next",
+            ).click()
+            t.sleep(0.5)
+        else:
+            raise ValueError(f"Could not navigate to {target_month_year}")
+
+        days = shadow_root.find_elements(
+            By.CSS_SELECTOR,
+            ".DayPicker-Day:not(.DayPicker-Day--disabled):not(.DayPicker-Day--outside)",
+        )
+        target_day = str(self.start_date.day)
+        for day in days:
+            if day.text.strip() == target_day:
+                day.click()
+                t.sleep(0.5)
+                break
+        else:
+            raise ValueError(f"Could not select day {target_day} in {target_month_year}")
+
+        time_dropdown = shadow_root.find_element(
+            By.CSS_SELECTOR,
+            "select.otrl-jp__time-input--hour-minute",
+        )
+        hour, minute = map(int, self.start_time.split(":"))
+        if minute not in (0, 15, 30, 45):
+            raise ValueError(
+                f"Minute must be 00, 15, 30 or 45. Got: {minute:02d}"
+            )
+        time_index = (hour * 4) + (minute // 15) + 1
+        Select(time_dropdown).select_by_index(time_index)
+        t.sleep(0.3)
+
+        shadow_root.find_element(
+            By.CSS_SELECTOR, ".otrl-jp__date-popup__button"
+        ).click()
+        wait.until(
+            lambda d: shadow_root.find_element(By.CSS_SELECTOR, ".otrl-jp__date-input")
+        )
+        self.progress.emit(
+            f"Selected outbound date/time: {self.start_date:%Y-%m-%d} {self.start_time}"
+        )
 
     # ------------------------------------------------------------------
     def run(self):
@@ -89,6 +158,12 @@ class ScraperThread(QThread):
                 By.CSS_SELECTOR, ".otrl-jp__station-autosuggest__item"
             ).click()
             t.sleep(3)
+
+            # --- select outbound date/time ---
+            self.progress.emit(
+                f"Setting outbound date/time to {self.start_date:%Y-%m-%d} {self.start_time} …"
+            )
+            self._select_outbound_date_time(driver, shadow_root)
 
             # --- click search ---
             shadow_root.find_element(

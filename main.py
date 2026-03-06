@@ -10,7 +10,7 @@ from PyQt6.QtCore import Qt, QDate
 from PyQt6.QtGui import QFont, QColor, QPalette, QIcon, QTextCharFormat
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
-    QLabel, QLineEdit, QDateEdit, QPushButton, QTextEdit, QCalendarWidget,
+    QLabel, QLineEdit, QDateEdit, QComboBox, QPushButton, QTextEdit, QCalendarWidget,
     QSplitter, QFrame, QGroupBox, QSizePolicy, QFileDialog,
 )
 
@@ -64,7 +64,7 @@ QLabel {{
     color: {TEXT_DIM};
     font-size: 12px;
 }}
-QLineEdit, QDateEdit {{
+QLineEdit, QDateEdit, QComboBox {{
     background-color: {BG_INPUT};
     border: 1px solid {BORDER};
     border-radius: 6px;
@@ -73,8 +73,15 @@ QLineEdit, QDateEdit {{
     font-size: 13px;
     selection-background-color: {ACCENT};
 }}
-QLineEdit:focus, QDateEdit:focus {{
+QLineEdit:focus, QDateEdit:focus, QComboBox:focus {{
     border: 1px solid {ACCENT};
+}}
+QComboBox QAbstractItemView {{
+    background-color: {BG_CARD};
+    color: {TEXT};
+    selection-background-color: {ACCENT};
+    selection-color: #ffffff;
+    border: 1px solid {BORDER};
 }}
 QPushButton#startBtn {{
     background-color: {ACCENT};
@@ -241,6 +248,7 @@ class MainWindow(QMainWindow):
         self._df = None
         self._last_leaving = ""
         self._last_going = ""
+        self._last_start_dt = None
         self._last_end_date = None
 
         central = QWidget()
@@ -282,33 +290,35 @@ class MainWindow(QMainWindow):
         to_col.addWidget(self.to_edit)
         input_layout.addLayout(to_col, 2)
 
+        # Start date
+        start_date_col = QVBoxLayout()
+        start_date_col.addWidget(QLabel("START DATE"))
+        self.start_date_edit = QDateEdit()
+        self.start_date_edit.setCalendarPopup(True)
+        self.start_date_edit.setDisplayFormat("dd MMM yyyy")
+        self._configure_calendar(self.start_date_edit)
+        default_start = QDate.currentDate()
+        self.start_date_edit.setDate(default_start)
+        self.start_date_edit.setMinimumDate(QDate.currentDate())
+        self.start_date_edit.dateChanged.connect(self._sync_date_constraints)
+        start_date_col.addWidget(self.start_date_edit)
+        input_layout.addLayout(start_date_col, 1)
+
+        # Start time
+        start_time_col = QVBoxLayout()
+        start_time_col.addWidget(QLabel("START TIME"))
+        self.start_time_combo = QComboBox()
+        self.start_time_combo.addItems(self._build_time_options())
+        start_time_col.addWidget(self.start_time_combo)
+        input_layout.addLayout(start_time_col, 1)
+
         # End date
         date_col = QVBoxLayout()
         date_col.addWidget(QLabel("SCRAPE UNTIL"))
         self.date_edit = QDateEdit()
         self.date_edit.setCalendarPopup(True)
         self.date_edit.setDisplayFormat("dd MMM yyyy")
-        calendar = self.date_edit.calendarWidget()
-        calendar.setHorizontalHeaderFormat(QCalendarWidget.HorizontalHeaderFormat.ShortDayNames)
-        calendar.setVerticalHeaderFormat(QCalendarWidget.VerticalHeaderFormat.NoVerticalHeader)
-        calendar.setGridVisible(True)
-        calendar.setMinimumSize(340, 240)
-        weekday_format = QTextCharFormat()
-        weekday_format.setForeground(QColor(TEXT))
-        saturday_format = QTextCharFormat()
-        saturday_format.setForeground(QColor(DANGER))
-        sunday_format = QTextCharFormat()
-        sunday_format.setForeground(QColor(DANGER))
-        for day in (
-            Qt.DayOfWeek.Monday,
-            Qt.DayOfWeek.Tuesday,
-            Qt.DayOfWeek.Wednesday,
-            Qt.DayOfWeek.Thursday,
-            Qt.DayOfWeek.Friday,
-        ):
-            calendar.setWeekdayTextFormat(day, weekday_format)
-        calendar.setWeekdayTextFormat(Qt.DayOfWeek.Saturday, saturday_format)
-        calendar.setWeekdayTextFormat(Qt.DayOfWeek.Sunday, sunday_format)
+        self._configure_calendar(self.date_edit)
         default_end = QDate.currentDate().addDays(7)
         self.date_edit.setDate(default_end)
         self.date_edit.setMinimumDate(QDate.currentDate())
@@ -366,6 +376,42 @@ class MainWindow(QMainWindow):
         root_layout.addWidget(splitter, 1)
 
     # ── actions ─────────────────────────────────────────────────────
+    def _configure_calendar(self, date_edit: QDateEdit):
+        calendar = date_edit.calendarWidget()
+        calendar.setHorizontalHeaderFormat(QCalendarWidget.HorizontalHeaderFormat.ShortDayNames)
+        calendar.setVerticalHeaderFormat(QCalendarWidget.VerticalHeaderFormat.NoVerticalHeader)
+        calendar.setGridVisible(True)
+        calendar.setMinimumSize(340, 240)
+        weekday_format = QTextCharFormat()
+        weekday_format.setForeground(QColor(TEXT))
+        saturday_format = QTextCharFormat()
+        saturday_format.setForeground(QColor(DANGER))
+        sunday_format = QTextCharFormat()
+        sunday_format.setForeground(QColor(DANGER))
+        for day in (
+            Qt.DayOfWeek.Monday,
+            Qt.DayOfWeek.Tuesday,
+            Qt.DayOfWeek.Wednesday,
+            Qt.DayOfWeek.Thursday,
+            Qt.DayOfWeek.Friday,
+        ):
+            calendar.setWeekdayTextFormat(day, weekday_format)
+        calendar.setWeekdayTextFormat(Qt.DayOfWeek.Saturday, saturday_format)
+        calendar.setWeekdayTextFormat(Qt.DayOfWeek.Sunday, sunday_format)
+
+    def _build_time_options(self) -> list[str]:
+        options = []
+        for hour in range(24):
+            for minute in (0, 15, 30, 45):
+                options.append(f"{hour:02d}:{minute:02d}")
+        return options
+
+    def _sync_date_constraints(self):
+        start_date = self.start_date_edit.date()
+        self.date_edit.setMinimumDate(start_date)
+        if self.date_edit.date() < start_date:
+            self.date_edit.setDate(start_date)
+
     def on_start(self):
         leaving = self.from_edit.text().strip()
         going = self.to_edit.text().strip()
@@ -373,11 +419,22 @@ class MainWindow(QMainWindow):
             self.log.append("⚠  Please enter both stations.")
             return
 
+        start_qdate = self.start_date_edit.date()
+        start_time_text = self.start_time_combo.currentText()
+        start_hour, start_minute = map(int, start_time_text.split(":"))
+        start_dt = datetime.datetime(
+            start_qdate.year(), start_qdate.month(), start_qdate.day(),
+            start_hour, start_minute,
+        )
         qdate = self.date_edit.date()
         end_date = datetime.date(qdate.year(), qdate.month(), qdate.day())
+        if start_dt.date() > end_date:
+            self.log.append("⚠  Start date must be on or before the scrape-until date.")
+            return
 
         self.log.clear()
-        self.log.append(f"Starting scrape: {leaving} → {going}  (until {end_date})")
+        start_label = start_dt.strftime("%Y-%m-%d %H:%M")
+        self.log.append(f"Starting scrape: {leaving} → {going}  (from {start_label}, until {end_date})")
 
         self.start_btn.setEnabled(False)
         self.stop_btn.setEnabled(True)
@@ -385,9 +442,10 @@ class MainWindow(QMainWindow):
 
         self._last_leaving = leaving
         self._last_going = going
+        self._last_start_dt = start_dt
         self._last_end_date = end_date
 
-        self._thread = ScraperThread(leaving, going, end_date)
+        self._thread = ScraperThread(leaving, going, start_qdate.toPyDate(), start_time_text, end_date)
         self._thread.progress.connect(self._on_progress)
         self._thread.results.connect(self._on_results)
         self._thread.error.connect(self._on_error)
