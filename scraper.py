@@ -98,6 +98,13 @@ class ScraperThread(QThread):
 
             # --- scrape results ---
             self.progress.emit("Results page loaded – beginning scrape …")
+            
+            # Switch to list view
+            self.progress.emit("Switching to list view …")
+            listview = driver.find_element(By.CSS_SELECTOR, 'a[aria-label="List view"]')
+            listview.click()
+            t.sleep(3)
+
             wait = WebDriverWait(driver, 5)
             seen_departures: set = set()
             records: list[dict] = []
@@ -105,7 +112,7 @@ class ScraperThread(QThread):
             # Determine the current displayed date
             try:
                 date_text = driver.find_element(
-                    By.CSS_SELECTOR, ".service-carousel-header-v2__date"
+                    By.CSS_SELECTOR, ".service-list__heading2"
                 ).text.strip()
                 current_date = datetime.datetime.strptime(date_text, "%a %d %b %Y").date()
             except Exception as e:
@@ -117,12 +124,12 @@ class ScraperThread(QThread):
             # ---- helper ------------------------------------------------
             def parse_current_page():
                 nonlocal current_date_tracker
-                train_items = driver.find_elements(By.CSS_SELECTOR, ".service-box-v2__item")
-                fare_tiles = driver.find_elements(By.CSS_SELECTOR, ".fare-list-v2__tile .price")
+                cards = driver.find_elements(By.CSS_SELECTOR, ".service-list__card.service-fare")
 
-                for i, item in enumerate(train_items):
+                for i, card in enumerate(cards):
                     try:
-                        sr_text = item.find_element(By.CSS_SELECTOR, ".sr-only").text
+                        # Journey info from sr-text h4
+                        sr_text = card.find_element(By.CSS_SELECTOR, "h4.sr-text").text
 
                         dep_match = re.search(r'^(\d{2}:\d{2})', sr_text)
                         arr_match = re.search(r'arriving at .+? at (\d{2}:\d{2})', sr_text)
@@ -151,11 +158,16 @@ class ScraperThread(QThread):
 
                         duration = dur_match.group(1).strip() if dur_match else None
                         changes = int(chg_match.group(1)) if chg_match else 0
+                        
                         price = None
-                        if i < len(fare_tiles):
-                            price_text = fare_tiles[i].text.strip()
-                            price_match = re.search(r'[\d.]+', price_text)
-                            price = float(price_match.group()) if price_match else None
+                        try:
+                            # Target the sr-text span inside the button for a clean price string
+                            price_element = card.find_element(By.CSS_SELECTOR, ".btn-continue .sr-text")
+                            price_text = price_element.text  
+                            # Clean the string (remove £) and convert to float
+                            price = float(price_text.replace('£', '').strip())
+                        except Exception:
+                            pass
 
                         departure_dt = datetime.datetime.combine(current_date, dep_time)
                         arrival_dt = None
@@ -193,24 +205,39 @@ class ScraperThread(QThread):
                     break
 
                 try:
-                    t.sleep(random.uniform(0.3, 1.4))
-                    last_departure_before = driver.find_elements(
-                        By.CSS_SELECTOR,
-                        ".service-box-v2__item .departure-time time",
-                    )[-1].get_attribute("datetime")
+                    t.sleep(random.uniform(1.2, 2.2))
+                    time_elements = driver.find_elements(
+                        By.CSS_SELECTOR, ".service-list-v2__services li .service-summary__station time"
+                    )
+                    if not time_elements:
+                        self.progress.emit(f"Click {click_num + 1}: no time elements found, stopping.")
+                        break
+                    last_departure_before = time_elements[-1].get_attribute("datetime")
 
                     later_btn = wait.until(
                         EC.element_to_be_clickable(
-                            (By.CSS_SELECTOR, "a.service-pager.pull-right")
+                            (By.CSS_SELECTOR, "a.service-pager[aria-label='Show later trains']")
                         )
                     )
                     driver.execute_script("arguments[0].click();", later_btn)
+                    
+                    def page_has_updated(d):
+                        try:
+                            elements = d.find_elements(
+                                By.CSS_SELECTOR, ".service-list-v2__services li .service-summary__station time"
+                            )
+                            return (
+                                len(elements) > 0
+                                and elements[-1].get_attribute("datetime") != last_departure_before
+                            )
+                        except Exception:
+                            return False
+
+                    WebDriverWait(driver, 10).until(page_has_updated)
                     WebDriverWait(driver, 10).until(
-                        lambda d: d.find_elements(
-                            By.CSS_SELECTOR,
-                            ".service-box-v2__item .departure-time time",
-                        )[-1].get_attribute("datetime") != last_departure_before
+                        EC.presence_of_element_located((By.CSS_SELECTOR, ".service-list-v2__services li .btn-continue"))
                     )
+
                 except TimeoutException:
                     self.progress.emit("No more 'Later' results — stopping.")
                     break

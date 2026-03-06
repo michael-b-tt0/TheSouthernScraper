@@ -7,10 +7,10 @@ import sys
 import datetime
 
 from PyQt6.QtCore import Qt, QDate
-from PyQt6.QtGui import QFont, QColor, QPalette, QIcon
+from PyQt6.QtGui import QFont, QColor, QPalette, QIcon, QTextCharFormat
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
-    QLabel, QLineEdit, QDateEdit, QPushButton, QTextEdit,
+    QLabel, QLineEdit, QDateEdit, QPushButton, QTextEdit, QCalendarWidget,
     QSplitter, QFrame, QGroupBox, QSizePolicy, QFileDialog,
 )
 
@@ -118,6 +118,40 @@ QTextEdit {{
 QSplitter::handle {{
     background-color: {BORDER};
     height: 2px;
+}}
+QCalendarWidget QWidget {{
+    alternate-background-color: {BG_CARD};
+}}
+QCalendarWidget QWidget#qt_calendar_navigationbar {{
+    background-color: {BG_CARD};
+    border-bottom: 1px solid {BORDER};
+}}
+QCalendarWidget QToolButton {{
+    color: {TEXT};
+    background-color: {BG_CARD};
+    border: none;
+    padding: 6px;
+}}
+QCalendarWidget QMenu {{
+    background-color: {BG_CARD};
+    color: {TEXT};
+}}
+QCalendarWidget QSpinBox {{
+    color: {TEXT};
+    background-color: {BG_CARD};
+    selection-background-color: {ACCENT};
+}}
+QCalendarWidget QAbstractItemView:enabled {{
+    color: {TEXT};
+    background-color: {BG_CARD};
+    selection-background-color: {ACCENT};
+    selection-color: #ffffff;
+}}
+QCalendarWidget QHeaderView::section {{
+    color: {TEXT};
+    background-color: {BG_INPUT};
+    padding: 4px 0;
+    border: 0px;
 }}
 """
 
@@ -254,6 +288,27 @@ class MainWindow(QMainWindow):
         self.date_edit = QDateEdit()
         self.date_edit.setCalendarPopup(True)
         self.date_edit.setDisplayFormat("dd MMM yyyy")
+        calendar = self.date_edit.calendarWidget()
+        calendar.setHorizontalHeaderFormat(QCalendarWidget.HorizontalHeaderFormat.ShortDayNames)
+        calendar.setVerticalHeaderFormat(QCalendarWidget.VerticalHeaderFormat.NoVerticalHeader)
+        calendar.setGridVisible(True)
+        calendar.setMinimumSize(340, 240)
+        weekday_format = QTextCharFormat()
+        weekday_format.setForeground(QColor(TEXT))
+        saturday_format = QTextCharFormat()
+        saturday_format.setForeground(QColor(DANGER))
+        sunday_format = QTextCharFormat()
+        sunday_format.setForeground(QColor(DANGER))
+        for day in (
+            Qt.DayOfWeek.Monday,
+            Qt.DayOfWeek.Tuesday,
+            Qt.DayOfWeek.Wednesday,
+            Qt.DayOfWeek.Thursday,
+            Qt.DayOfWeek.Friday,
+        ):
+            calendar.setWeekdayTextFormat(day, weekday_format)
+        calendar.setWeekdayTextFormat(Qt.DayOfWeek.Saturday, saturday_format)
+        calendar.setWeekdayTextFormat(Qt.DayOfWeek.Sunday, sunday_format)
         default_end = QDate.currentDate().addDays(7)
         self.date_edit.setDate(default_end)
         self.date_edit.setMinimumDate(QDate.currentDate())
