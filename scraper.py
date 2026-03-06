@@ -190,6 +190,36 @@ class ScraperThread(QThread):
                     except Exception as e:
                         self.progress.emit(f"  Error parsing train {i}: {e}")
 
+            def log_later_timeout(stage: str):
+                """Emit lightweight diagnostics when pagination stops responding."""
+                try:
+                    pager_buttons = driver.find_elements(
+                        By.CSS_SELECTOR, "a.service-pager[aria-label='Show later trains']"
+                    )
+                    button_count = len(pager_buttons)
+                    button_labels = [btn.text.strip() or "<no text>" for btn in pager_buttons[:2]]
+                except Exception as e:
+                    button_count = -1
+                    button_labels = [f"<error reading buttons: {e}>"]
+
+                try:
+                    visible_times = driver.find_elements(
+                        By.CSS_SELECTOR, ".service-list-v2__services li .service-summary__station time"
+                    )
+                    last_visible_time = (
+                        visible_times[-1].get_attribute("datetime") if visible_times else None
+                    )
+                except Exception as e:
+                    last_visible_time = f"<error reading times: {e}>"
+
+                self.progress.emit(
+                    f"Click {click_num + 1}: timeout while waiting for {stage}."
+                )
+                self.progress.emit(
+                    f"  Diagnostics: url={driver.current_url} | later_buttons={button_count} | "
+                    f"last_time={last_visible_time} | labels={button_labels}"
+                )
+
             # ---- initial parse ----------------------------------------
             parse_current_page()
             self.progress.emit(f"After initial load: {len(records)} trains")
@@ -214,11 +244,16 @@ class ScraperThread(QThread):
                         break
                     last_departure_before = time_elements[-1].get_attribute("datetime")
 
-                    later_btn = wait.until(
-                        EC.element_to_be_clickable(
-                            (By.CSS_SELECTOR, "a.service-pager[aria-label='Show later trains']")
+                    try:
+                        later_btn = wait.until(
+                            EC.element_to_be_clickable(
+                                (By.CSS_SELECTOR, "a.service-pager[aria-label='Show later trains']")
+                            )
                         )
-                    )
+                    except TimeoutException:
+                        log_later_timeout("the 'Later' button to become clickable")
+                        break
+
                     driver.execute_script("arguments[0].click();", later_btn)
                     
                     def page_has_updated(d):
@@ -233,13 +268,24 @@ class ScraperThread(QThread):
                         except Exception:
                             return False
 
-                    WebDriverWait(driver, 10).until(page_has_updated)
-                    WebDriverWait(driver, 10).until(
-                        EC.presence_of_element_located((By.CSS_SELECTOR, ".service-list-v2__services li .btn-continue"))
-                    )
+                    try:
+                        WebDriverWait(driver, 10).until(page_has_updated)
+                    except TimeoutException:
+                        log_later_timeout("the results list to change after clicking 'Later'")
+                        break
 
-                except TimeoutException:
-                    self.progress.emit("No more 'Later' results — stopping.")
+                    try:
+                        WebDriverWait(driver, 10).until(
+                            EC.presence_of_element_located(
+                                (By.CSS_SELECTOR, ".service-list-v2__services li .btn-continue")
+                            )
+                        )
+                    except TimeoutException:
+                        log_later_timeout("refreshed fare buttons to appear")
+                        break
+
+                except Exception as e:
+                    self.progress.emit(f"Click {click_num + 1}: pagination failed: {e}")
                     break
 
                 parse_current_page()
